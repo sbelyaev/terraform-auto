@@ -1,0 +1,6 @@
+
+terraform {
+  foo {
+    bar = "test"
+  }
+}

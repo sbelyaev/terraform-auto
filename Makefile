@@ -12,7 +12,7 @@ deps:
 .PHONY: test
 test:
 	find cmd/testdata -type f -name 'terraform*' -exec chmod +x {} \;
-	go test ./...
+	go test -v ./...
 
 .PHONY: build
 build: $(BINDIR)/$(BINNAME)
