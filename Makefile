@@ -17,6 +17,9 @@ test:
 .PHONY: build
 build: $(BINDIR)/$(BINNAME)
 
+$(BINDIR)/$(BINNAME):
+	go build -o $(BINDIR)/$(BINNAME) ./cmd
+
 .PHONY: release
 release:
 	@for TARGET in $(TARGETS); do \
@@ -24,5 +27,9 @@ release:
 			echo go get -d -v -t ./... && \
 			export GOOS=$$(echo $$TARGET | cut -d/ -f1) && \
 			export GOARCH=$$(echo $$TARGET | cut -d/ -f2) && \
-			go build -o $(BINDIR)/$(BINNAME)-$$GOOS-$$GOARCH ; \
+			go build -o $(BINDIR)/$(BINNAME)-$$GOOS-$$GOARCH ./cmd; \
 	done
+
+.PHONY: clean
+clean:
+	rm -f bin/*

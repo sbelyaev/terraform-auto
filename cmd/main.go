@@ -3,19 +3,43 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 
-	"github.com/namsral/flag"
+	"io/ioutil"
+
+	version "github.com/hashicorp/go-version"
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclparse"
 )
 
 var (
-	flagDebug     = flag.Bool("debug", false, "enable dubug output")
-	defaultFilter = flag.String("default-filter", "= 0.13.6", "set default filter to '= 0.13.6'")
-	osPath        = flag.String("path", "", "system path variable")
+	flagDebug         bool
+	defaultConstraint string
+	osPath            string
 )
+
+func InitVars() {
+	v, exists := os.LookupEnv("PATH")
+	if exists {
+		osPath = v
+	}
+	v, exists = os.LookupEnv("DEBUG")
+	if exists && v == "true" {
+		flagDebug = true
+	} else {
+		flagDebug = false
+	}
+	v, exists = os.LookupEnv("DEFAULT_CONSTRAINT")
+	if exists {
+		defaultConstraint = v
+	} else {
+		defaultConstraint = "= 0.13.6"
+	}
+}
 
 /*
  Usage:
@@ -30,21 +54,110 @@ var (
  4) this tool will call a suitable binary depend on filter applied
 */
 func main() {
-	flag.Parse()
-	tfmBins := InitTfmBins(osPath)
-	for verStr, file := range tfmBins {
-		fmt.Printf("version: %s, file: %s\n", verStr, file)
+	InitVars()
+	tfmBins := InitTfmBins(&osPath)
+	err, verConstraints := ParseTfConfigs("./")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] %s", err.Error())
+		os.Exit(1)
 	}
+	tfmBinFile := SelectTfmBin(verConstraints, tfmBins)
+	myDebug("Calling: %s", tfmBinFile)
+	if tfmBinFile == "" {
+		fmt.Println("[ERROR] there is no file to execute")
+		os.Exit(1)
+	}
+	out, err := exec.Command(tfmBinFile, os.Args[1:]...).CombinedOutput()
+	fmt.Println(string(out[:]))
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
+// SelectTfmBin searches suitable binary to execute
+func SelectTfmBin(c string, b map[string]string) string {
+	tfVerConstraints, _ := version.NewConstraint(c)
+	var (
+		finalVersionStr string
+		finaFile        string
+	)
+	for verStr, file := range b {
+		myDebug("(%s): %s", verStr, file)
+		tfNewVersion, _ := version.NewVersion(verStr)
+		myDebug("%v vs %v", tfNewVersion, tfVerConstraints)
+		if tfVerConstraints.Check(tfNewVersion) {
+			myDebug("Got terraform bin: %s", file)
+			if finalVersionStr != "" {
+				oldVersion, _ := version.NewVersion(finalVersionStr)
+				if oldVersion.LessThan(tfNewVersion) {
+					finalVersionStr = verStr
+					finaFile = file
+				}
+			} else {
+				finalVersionStr = verStr
+				finaFile = file
+			}
+		} else {
+			myDebug("Skip file: %s", file)
+		}
+	}
+	return finaFile
+}
+
+// ParseTfConfigs reads *.tf files to get value of "required_version" attribute
+func ParseTfConfigs(workdirDir string) (error, string) {
+	var versionString string
+	configRootSchema := &hcl.BodySchema{
+		Blocks: []hcl.BlockHeaderSchema{
+			{
+				Type: "terraform",
+			},
+		},
+	}
+	configFileVersionSniffBlockSchema := &hcl.BodySchema{
+		Attributes: []hcl.AttributeSchema{
+			{
+				Name: "required_version",
+			},
+		},
+	}
+	matches, _ := filepath.Glob(fmt.Sprintf("%s/*.tf", workdirDir))
+	for _, path := range matches {
+		if src, err := ioutil.ReadFile(path); err == nil {
+			file, _ := hclparse.NewParser().ParseHCL(src, path)
+			if file == nil || file.Body == nil {
+				continue
+			}
+			rootContent, _, _ := file.Body.PartialContent(configRootSchema)
+			for _, block := range rootContent.Blocks {
+				content, _, _ := block.Body.PartialContent(configFileVersionSniffBlockSchema)
+				attr, exists := content.Attributes["required_version"]
+				if !exists || len(versionString) > 0 {
+					continue
+				}
+				val, diags := attr.Expr.Value(nil)
+				if diags.HasErrors() {
+					err = fmt.Errorf("Error in attribute value")
+					return err, ""
+				}
+				versionString = val.AsString()
+			}
+		}
+	}
+	if versionString == "" {
+		versionString = defaultConstraint
+	}
+	return nil, versionString
 }
 
 // InitTfmBins locates terraform binaries through $PATH
 func InitTfmBins(osPath *string) map[string]string {
 	tfmBins := make(map[string]string)
 	pathDelimeter := ":"
-	tfmRegexStr := `^(.*)/terraform-(.*)$`
+	tfmRegexStr := `^(.*)/terraform-([0-9]*\.[0-9]*\.[0-9]*)$`
 	if runtime.GOOS == "windows" {
 		pathDelimeter = ";"
-		tfmRegexStr = `^(.*)\\terraform-(.*)\.exe$`
+		tfmRegexStr = `^(.*)\\terraform-([0-9]*\.[0-9]*\.[0-9]*)\.exe$`
 	}
 	execPaths := strings.Split(*osPath, pathDelimeter)
 	myDebug("Paths to locate terraform: %v", execPaths)
@@ -56,9 +169,11 @@ func InitTfmBins(osPath *string) map[string]string {
 				if fileInfo, err := os.Lstat(match); err == nil {
 					if fileInfo.Mode().IsRegular() && (fileInfo.Mode().Perm()&0111 == 0111) {
 						tfmVersionRegex := regexp.MustCompile(tfmRegexStr)
-						tfmVersion := tfmVersionRegex.ReplaceAllString(match, "$2")
-						if tfmBins[tfmVersion] == "" {
-							tfmBins[tfmVersion] = match
+						if tfmVersionRegex.MatchString(match) {
+							tfmVersion := tfmVersionRegex.ReplaceAllString(match, "$2")
+							if tfmBins[tfmVersion] == "" {
+								tfmBins[tfmVersion] = match
+							}
 						}
 					}
 				}
@@ -66,7 +181,7 @@ func InitTfmBins(osPath *string) map[string]string {
 			f.Close()
 		}
 	}
-	if *flagDebug {
+	if flagDebug {
 		for verStr, file := range tfmBins {
 			myDebug("version: %s, file: %s", verStr, file)
 		}
@@ -74,9 +189,9 @@ func InitTfmBins(osPath *string) map[string]string {
 	return tfmBins
 }
 
-// Print if debug is enabled
+// myDebug prints to stderr if debug is enabled
 func myDebug(format string, a ...interface{}) {
-	if *flagDebug {
+	if flagDebug {
 		format = fmt.Sprintf("[DEBUG] %s\n", format)
 		fmt.Fprintf(os.Stderr, format, a...)
 	}
