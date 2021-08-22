@@ -16,29 +16,34 @@ import (
 	"github.com/hashicorp/hcl/v2/hclparse"
 )
 
-var (
-	flagDebug         bool
-	defaultConstraint string
-	osPath            string
+const (
+	// VerConstraint is used as application level default, it's also used in unit tests
+	VerConstraint = "= 0.13.6"
 )
 
+// Varables are also used in unit tests
+var (
+	FlagDebug         bool
+	DefaultConstraint string
+	OsPath            string
+)
+
+// InitVars reads environment variables and set global vars
 func InitVars() {
-	v, exists := os.LookupEnv("PATH")
-	if exists {
-		osPath = v
-	}
-	v, exists = os.LookupEnv("DEBUG")
+	v, exists := os.LookupEnv("DEBUG")
 	if exists && v == "true" {
-		flagDebug = true
+		FlagDebug = true
 	} else {
-		flagDebug = false
+		FlagDebug = false
 	}
 	v, exists = os.LookupEnv("DEFAULT_CONSTRAINT")
 	if exists {
-		defaultConstraint = v
+		DefaultConstraint = v
 	} else {
-		defaultConstraint = "= 0.13.6"
+		DefaultConstraint = VerConstraint
 	}
+	v, _ = os.LookupEnv("PATH")
+	OsPath = v
 }
 
 /*
@@ -55,8 +60,8 @@ func InitVars() {
 */
 func main() {
 	InitVars()
-	tfmBins := InitTfmBins(&osPath)
-	err, verConstraints := ParseTfConfigs("./")
+	tfmBins := InitTfmBins(&OsPath)
+	verConstraints, err := ParseTfmConfigs("./")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[ERROR] %s", err.Error())
 		os.Exit(1)
@@ -104,8 +109,8 @@ func SelectTfmBin(c string, b map[string]string) string {
 	return finaFile
 }
 
-// ParseTfConfigs reads *.tf files to get value of "required_version" attribute
-func ParseTfConfigs(workdirDir string) (error, string) {
+// ParseTfmConfigs reads *.tf files to get value of "required_version" attribute
+func ParseTfmConfigs(workdirDir string) (string, error) {
 	var versionString string
 	configRootSchema := &hcl.BodySchema{
 		Blocks: []hcl.BlockHeaderSchema{
@@ -138,16 +143,16 @@ func ParseTfConfigs(workdirDir string) (error, string) {
 				val, diags := attr.Expr.Value(nil)
 				if diags.HasErrors() {
 					err = fmt.Errorf("Error in attribute value")
-					return err, ""
+					return "", err
 				}
 				versionString = val.AsString()
 			}
 		}
 	}
 	if versionString == "" {
-		versionString = defaultConstraint
+		versionString = DefaultConstraint
 	}
-	return nil, versionString
+	return versionString, nil
 }
 
 // InitTfmBins locates terraform binaries through $PATH
@@ -181,7 +186,7 @@ func InitTfmBins(osPath *string) map[string]string {
 			f.Close()
 		}
 	}
-	if flagDebug {
+	if FlagDebug {
 		for verStr, file := range tfmBins {
 			myDebug("version: %s, file: %s", verStr, file)
 		}
@@ -191,7 +196,7 @@ func InitTfmBins(osPath *string) map[string]string {
 
 // myDebug prints to stderr if debug is enabled
 func myDebug(format string, a ...interface{}) {
-	if flagDebug {
+	if FlagDebug {
 		format = fmt.Sprintf("[DEBUG] %s\n", format)
 		fmt.Fprintf(os.Stderr, format, a...)
 	}
